@@ -1,0 +1,254 @@
+---
+title: "Classifying Exercises Using Data from Wearable Accelerometers"
+author: "Chris Selig"
+date: "February 8, 2017"
+output:
+  html_document: default
+  word_document: default
+---
+
+#Executive Summary
+In this analysis, I will use a random forest model to predict which activities were performed based on belt, forearm, arm, and dumbell accelerometers.
+
+#Data 
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+```{r echo = FALSE, include=FALSE}
+library(caret);library(randomForest); library(e1071)
+library(rpart);library(rattle);library(rpart.plot)
+```
+
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+
+
+TrainingDataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+TestingDataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(TrainingDataUrl, "training.csv")
+download.file(TestingDataUrl, "testing.csv")
+
+#Loading datasets
+training <- read.csv("training.csv", header = TRUE, 
+                     na.strings = c("",NA,"#DIV/0!"), 
+                     stringsAsFactors = FALSE)
+testing <- read.csv("testing.csv", header = TRUE,
+                    na.strings = c("",NA,"#DIV/0!"),
+                    stringsAsFactors = FALSE)
+```
+
+After loading the two datasets (training and testing), I create a validation set that could be used to tune the model before using the test data set.  To do this, I split 30% of the training data set into the validation set.
+
+```{r}
+inTrain <- createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+training <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+#Exploratory Data Analysis
+The training set has 160 variables and 13,737 observations.  Another item of note is that there is a significant amount of missing values in some of the variables.  As a matter of fact, over 13,000 for those variables.  We will need to handle all of those missing values before we build a model.
+```{r echo = FALSE}
+dim(training)
+```
+A final takeaway from the exploratory analysis, is that there appears to be a row that is a summation line. These lines are tagged with "yes" in the new_window variable.
+
+#Data Processing and Feature Selection
+First up, I removed the summation lines from the training data.
+```{r echo = FALSE, include=FALSE}
+#Convert classe to a factor variable
+training$classe <- as.factor(training$classe)
+```
+```{r}
+training <- training[!training$new_window == "yes",]
+```
+
+Looking at the training data set, there are variables that are useless, for example, time stamps and user names.  I will remove those variables as well.
+```{r}
+training <- subset(training, select = -c(X, user_name, raw_timestamp_part_1,
+                                         raw_timestamp_part_2, cvtd_timestamp, new_window))
+```
+At this point, there are still 154 variables in the training data set.  Next, I will look for zero variance, or near zero variance variables.  Near-zero variance means that the fraction of unique values over the sample size is low and the ratio of the frequency of the most prevalent value to the frequency of the second most prevalent value is large.  So, near zero variances should have less predictive power.  Here is the first 6 lines, which shows the variable kurtosis_roll_belt having zero variance.
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+nsv <- nearZeroVar(training[,-154], saveMetrics = TRUE)
+```
+```{r echo= FALSE}
+head(nsv)
+```
+After I remove the near zero variances, I am left with 54 variables in the training data set.
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+nsv <- nearZeroVar(training)
+training <- training[,-nsv]
+```
+```{r echo = FALSE}
+dim(training)
+```
+A lot of variables are still left.  Next, I will use a random forest to see if I can elminate less important variables.  During this process, I grew 250 trees and calculated their importance.
+```{r cache = TRUE}
+fit.forest <- randomForest(classe ~., data = training, importance = TRUE, ntree = 250)
+varImpPlot(fit.forest, type = 1)
+```
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+varImp <- importance(fit.forest)
+```
+Reading the chart above, from right to left, the top variables (y axis) have the highest decrease in accuracy if they are removed.  When you get to the 25th variable down the x-asis, the decrease in accuracy is approximately 10%.  That looks to be a fair place to cut off the variables used in the prediction model.  So, I will use the top 25.
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+selVars <- names(sort(varImp[,1], decreasing = TRUE))[1:25 & 54]
+```
+
+#The Random Forest Model
+The random forest model has been chosen to do the predictions because:
+1.  They tend to be very accurate compared with other classification methods.
+2.  They handle a large number of variables, observations and missing values.
+3.  No need to perform cross validation because the random forest has built in functionality to do this.
+4.  A random forest can handle unscaled variables and categorical variables, which reduces the need for cleaning and transforming variables which are steps that can be subject to overfitting and noise.
+5.  Individual trees can be pulled out of the random forest and examined. 
+
+To create the model, I used the randomForest package from Cran.
+```{r cache= TRUE}
+modRF <- randomForest(x = training[,selVars], y = training$classe,
+                      ntree = 100,
+                      nodesize = 7,
+                      importance = TRUE)
+```
+
+And now the fun part, lets predict how well the model does on the training set.
+```{r cache = TRUE}
+predictTRF <- predict(modRF, newdata = training[,selVars])
+confusionMatrix(predictTRF, training$classe)
+```
+At a 95% confidence interval, the model predicts between 0.9997% and 100% accuracy.  That is great, but it worries me that maybe the model shows overfitting.  In this case, it classified all of the exercises into the appropriate bucket (A, B, C, etc).
+
+To test, lets apply the model to the validation set.  To do this, I first performed the same transformations to the validation set, as I did the training set.  You can see this code in the appendix. 
+
+```{r echo = FALSE, include=FALSE, cache=TRUE}
+validation$classe <- as.factor(validation$classe)
+validation <- validation[!validation$new_window == "yes",]
+validation <- subset(validation, select = -c(X, user_name, raw_timestamp_part_1,
+                                         raw_timestamp_part_2, cvtd_timestamp, new_window))
+```
+Next, I will predict the exercises in the validation set.
+```{r cache = TRUE}
+predictVRF <- predict(modRF, newdata = validation[,selVars])
+confusionMatrix(predictVRF, validation$classe)
+```
+Again, at a 95% confidence interval, the model is accurate between 99.91 % to 100%.
+
+Finally, on the test set, I predict what the evercises are.  First though, I perform the same data transformations as before.
+
+Here are the results of my predictions on the test set:
+```{r}
+predictTRF <- predict(modRF, newdata = testing[,selVars])
+table(predictTRF)
+```
+
+Thank you for reading!
+
+#Sources
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4Y9rnY25i
+
+#Appendix
+
+So anyone can reproduce the above work, here is the code.
+```{r eval = FALSE}
+library(caret);library(randomForest); library(e1071)
+library(rpart);library(rattle);library(rpart.plot)
+
+TrainingDataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+TestingDataUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(TrainingDataUrl, "training.csv")
+download.file(TestingDataUrl, "testing.csv")
+
+#Loading datasets
+training <- read.csv("training.csv", header = TRUE, 
+                     na.strings = c("",NA,"#DIV/0!"), 
+                     stringsAsFactors = FALSE)
+testing <- read.csv("testing.csv", header = TRUE,
+                    na.strings = c("",NA,"#DIV/0!"),
+                    stringsAsFactors = FALSE)
+
+#Split training data into a validation set, now that the data is processed
+inTrain <- createDataPartition(y = training$classe, p = 0.7, list = FALSE)
+training <- training[inTrain,]
+validation <- training[-inTrain,]
+
+
+set.seed(197811)
+
+#Exploratory Data Analysis (on training set)
+dim(training)
+str(training)
+summary(training)
+View(training)
+
+
+#Convert classe to a factor variable
+training$classe <- as.factor(training$classe)
+
+##Selecting the Predictors to use in the model
+#When viewed the data, it looks like there were summation lines, (when new window = yes)
+#Eliminate those
+training <- training[!training$new_window == "yes",]
+
+#Remove unneeded variables (X, time stamps, name variables)
+training <- subset(training, select = -c(X, user_name, raw_timestamp_part_1,
+                                         raw_timestamp_part_2, cvtd_timestamp, new_window))
+
+
+#Find Remove Zero Covariates (make sure you don't remove outcome variable (column 154))
+nsv <- nearZeroVar(training[,-154], saveMetrics = TRUE)
+nsv
+nsv <- nearZeroVar(training)
+training <- training[,-nsv]
+
+#53 variables is still quite alot, and makes it hard to explain the model.  
+#Going to use random forest to figure out which variable are most important
+fit.forest <- randomForest(classe ~., data = training, importance = TRUE, ntree = 250)
+varImpPlot(fit.forest, type = 1)
+varImp <- importance(fit.forest)
+
+#Looks like we can include the top 25 variables and still maintain model accuracy, so.
+#remove the extra variables
+selVars <- names(sort(varImp[,1], decreasing = TRUE))[1:25 & 54]
+
+#Fit a random forest model
+#In random forests, there is no need for cross-validation or a separate test set 
+#to get an unbiased estimate of the test set error. It is estimated internally , during the run...
+modRF <- randomForest(x = training[,selVars], y = training$classe,
+                      ntree = 100,
+                      nodesize = 7,
+                      importance = TRUE)
+
+#Do a prediction on the training data
+predictTRF <- predict(modRF, newdata = training[,selVars])
+
+#Check to see how well it works, not surprisingly, it did well on the training data
+confusionMatrix(predictTRF, training$classe)
+
+#Lets validate on the validation data set
+#First, we need to process the validation the same way as the training set
+validation$classe <- as.factor(validation$classe)
+validation <- validation[!validation$new_window == "yes",]
+validation <- subset(validation, select = -c(X, user_name, raw_timestamp_part_1,
+                                         raw_timestamp_part_2, cvtd_timestamp, new_window))
+
+#Predict using validation data
+predictVRF <- predict(modRF, newdata = validation[,selVars])
+confusionMatrix(predictVRF, validation$classe)
+
+#Still got a 99.99% accuracy rating
+
+#Process test data same way as training data
+testing$classe <- as.factor(testing$classe)
+testing <- testing[!testing$new_window == "yes",]
+testing <- subset(testing, select = -c(X, user_name, raw_timestamp_part_1,
+                                             raw_timestamp_part_2, cvtd_timestamp, new_window))
+
+#Predict using testing data
+predictTRF <- predict(modRF, newdata = testing[,selVars])
+table(predictTRF)
+```
